@@ -1,101 +1,192 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { Firestore } from '@google-cloud/firestore';
-import { AttemptLog, AIIntentResponse } from '../shared/interfaces/ai.interface';
-import { UserContext, ProcessedMessage } from '../whatsapp/interfaces/whatsapp.interface';
+import { Injectable, Logger }        from '@nestjs/common';
+import { FirestoreService }          from 'src/firestore/firestore.service';
+import { QueueService }              from 'src/queue/queue.service';
+import { WhatsAppMessage, UserContext, ProcessedMessage } from 'src/whatsapp/interfaces/whatsapp.interface';
+import { WhatsAppWebhookRequestDto } from 'src/whatsapp/dto/webhook-request.dto';
 
 @Injectable()
-export class FirestoreService {
-  private readonly logger = new Logger(FirestoreService.name);
-  private db: Firestore;
+export class WhatsAppService {
+  private readonly logger = new Logger(WhatsAppService.name);
 
-  constructor() {
-    this.db = new Firestore({
-      projectId: process.env.GCP_PROJECT_ID,
-      keyFilename: process.env.GCP_KEY_FILE,
-    });
-  }
+  constructor(
+    private readonly firestoreService: FirestoreService,
+    private readonly queueService: QueueService,
+  ) {}
 
-  // Métodos para intentos de IA
-  async logAttempt(data: {
-    message: string;
-    expectedIntent: string;
-    attempt: number;
-    prompt: string;
-    response: AIIntentResponse;
-    timestamp: Date;
-    tokensUsed?: number;
-  }): Promise<void> {
+  validateWebhook(body: WhatsAppWebhookRequestDto): boolean {
     try {
-      const collection = this.db.collection('ai_attempts');
-      await collection.add({
-        ...data,
-        timestamp: new Date(),
-      });
-      this.logger.debug(`Logged AI attempt ${data.attempt} for message`);
-    } catch (error) {
-      this.logger.error('Firestore logAttempt error:', error);
-      throw error;
-    }
-  }
-
-  async logFinalResult(data: {
-    message: string;
-    expectedIntent: string;
-    attempts: AttemptLog[];
-    success: boolean;
-    error?: string;
-    finalIntent?: string;
-    totalTokens?: number;
-  }): Promise<void> {
-    try {
-      const collection = this.db.collection('ai_results');
-      await collection.add({
-        ...data,
-        timestamp: new Date(),
-        totalAttempts: data.attempts.length,
-        processingTime: this.calculateProcessingTime(data.attempts),
-      });
-      this.logger.debug(`Logged final result for message: ${data.message.substring(0, 50)}...`);
-    } catch (error) {
-      this.logger.error('Firestore logFinalResult error:', error);
-      throw error;
-    }
-  }
-
-  // Métodos para WhatsApp y contexto de usuario
-  async getUserHistory(userId: string): Promise<{
-    lastIntent: string;
-    conversationHistory: Array<{
-      timestamp: Date;
-      message: string;
-      intent: string;
-      response: string;
-    }>;
-    preferredLanguage: string;
-    lastInteraction: Date;
-  }> {
-    try {
-      const userDoc = this.db.collection('users').doc(userId);
-      const doc = await userDoc.get();
-
-      if (!doc.exists) {
-        // Crear usuario si no existe
-        const defaultData = {
-          lastIntent: 'info_general',
-          conversationHistory: [],
-          preferredLanguage: 'es',
-          lastInteraction: new Date(),
-          createdAt: new Date(),
-        };
-        await userDoc.set(defaultData);
-        return defaultData;
+      // Validar estructura básica del webhook
+      if (!body?.object || body.object !== 'whatsapp_business_account') {
+        this.logger.warn('Invalid webhook object');
+        return false;
       }
 
-      return doc.data() as any;
+      if (!body.entry || !Array.isArray(body.entry) || body.entry.length === 0) {
+        this.logger.warn('No entries in webhook');
+        return false;
+      }
+
+      const entry = body.entry[0];
+      if (!entry.changes || !Array.isArray(entry.changes) || entry.changes.length === 0) {
+        this.logger.warn('No changes in entry');
+        return false;
+      }
+
+      const change = entry.changes[0];
+      if (!change.value?.messaging_product || change.value.messaging_product !== 'whatsapp') {
+        this.logger.warn('Invalid messaging product');
+        return false;
+      }
+
+      // ✅ Validación más específica de messages
+      if (!change.value.messages || 
+          !Array.isArray(change.value.messages) || 
+          change.value.messages.length === 0 ||
+          !change.value.messages[0] ||
+          !change.value.messages[0].text ||
+          !change.value.messages[0].from) {
+        this.logger.warn('No valid messages in webhook');
+        return false;
+      }
+
+      return true;
     } catch (error) {
-      this.logger.error(`Error getting user history for ${userId}:`, error);
-      // Retornar datos por defecto en caso de error
+      this.logger.error(`Webhook validation error: ${error.message}`);
+      return false;
+    }
+  }
+
+  extractMessageFromWebhook(body: WhatsAppWebhookRequestDto): WhatsAppMessage | null {
+    try {
+      // Validar primero (reutiliza la validación)
+      if (!this.validateWebhook(body)) {
+        return null;
+      }
+
+      const change = body.entry[0].changes[0];
+      const messageData = change.value.messages![0]; // ✅ Usar ! porque ya validamos
+      const contactData = change.value.contacts?.[0];
+
+      // Validaciones adicionales por seguridad
+      if (!messageData.text?.trim()) {
+        this.logger.warn('Message text is empty');
+        return null;
+      }
+
+      if (!messageData.from?.trim()) {
+        this.logger.warn('Message from is empty');
+        return null;
+      }
+
+      // Crear el objeto con valores por defecto
+      const whatsappMessage: WhatsAppMessage = {
+        id: messageData.id || `wa-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        text: messageData.text.trim(),
+        from: messageData.from,
+        timestamp: new Date(parseInt(messageData.timestamp || (Date.now() / 1000).toString()) * 1000),
+        phone_number_id: change.value.metadata.phone_number_id,
+        display_phone_number: change.value.metadata.display_phone_number,
+      };
+
+      this.logger.log(`Extracted message: ${whatsappMessage.id} from ${whatsappMessage.from}`);
+      return whatsappMessage;
+
+    } catch (error) {
+      this.logger.error(`Error extracting message: ${error.message}`);
+      return null;
+    }
+  }
+
+  async determineExpectedIntent(userId: string, message: string): Promise<string> {
+    try {
+      const userContext = await this.getUserContext(userId);
+      const keywordAnalysis = this.analyzeKeywords(message);
+      const historyAnalysis = this.analyzeHistory(userContext);
+      const finalIntent = this.combineAnalyses(keywordAnalysis, historyAnalysis);
+      
+      this.logger.log(`Determined expected intent for user ${userId}: ${finalIntent}`);
+      return finalIntent;
+    } catch (error) {
+      this.logger.error(`Error determining intent: ${error.message}`);
+      return 'info_general';
+    }
+  }
+
+  private analyzeKeywords(message: string): Array<{ intent: string; score: number }> {
+    const lowerMessage = message.toLowerCase();
+    const keywordPatterns = {
+      tracking: [
+        { keyword: 'pedido', weight: 2.0 }, { keyword: 'envío', weight: 2.0 },
+        { keyword: 'seguimiento', weight: 3.0 }, { keyword: 'llegar', weight: 1.5 },
+      ],
+      consult_order: [
+        { keyword: 'estado', weight: 2.5 }, { keyword: 'número de pedido', weight: 3.0 },
+      ],
+      complaint: [
+        { keyword: 'reclamo', weight: 3.0 }, { keyword: 'queja', weight: 3.0 },
+      ],
+      sales: [
+        { keyword: 'precio', weight: 2.0 }, { keyword: 'comprar', weight: 2.0 },
+      ],
+      support: [
+        { keyword: 'ayuda', weight: 1.5 }, { keyword: 'soporte', weight: 2.0 },
+      ],
+    };
+
+    const scores: Record<string, number> = {};
+
+    for (const [intent, patterns] of Object.entries(keywordPatterns)) {
+      scores[intent] = patterns.reduce((score, pattern) => {
+        if (lowerMessage.includes(pattern.keyword)) {
+          return score + pattern.weight;
+        }
+        return score;
+      }, 0);
+    }
+
+    return Object.entries(scores)
+      .map(([intent, score]) => ({ intent, score }))
+      .sort((a, b) => b.score - a.score);
+  }
+
+  private analyzeHistory(userContext: UserContext): string | null {
+    if (!userContext.conversationHistory.length) {
+      return null;
+    }
+
+    const lastInteraction = userContext.conversationHistory[0];
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
+    
+    if (lastInteraction.timestamp > tenMinutesAgo) {
+      return lastInteraction.intent;
+    }
+
+    return null;
+  }
+
+  private combineAnalyses(
+    keywordAnalysis: Array<{ intent: string; score: number }>,
+    historyIntent: string | null
+  ): string {
+    if (historyIntent && historyIntent !== 'info_general') {
+      return historyIntent;
+    }
+
+    const topKeywordIntent = keywordAnalysis[0];
+    if (topKeywordIntent.score >= 1.0) {
+      return topKeywordIntent.intent;
+    }
+
+    return 'info_general';
+  }
+
+  async getUserContext(userId: string): Promise<UserContext> {
+    try {
+      return await this.firestoreService.getUserHistory(userId);
+    } catch (error) {
+      this.logger.warn(`Could not get user context for ${userId}, using default`);
       return {
+        userId,
         lastIntent: 'info_general',
         conversationHistory: [],
         preferredLanguage: 'es',
@@ -104,183 +195,43 @@ export class FirestoreService {
     }
   }
 
-  async updateUserContext(
-    userId: string, 
-    newMessage: string, 
-    intent: string, 
-    response: string
-  ): Promise<void> {
+  async saveMessageProcessingResult(result: ProcessedMessage): Promise<void> {
     try {
-      const userDoc = this.db.collection('users').doc(userId);
-      const userData = await this.getUserHistory(userId);
-
-      // Actualizar historial de conversación (mantener últimos 50 mensajes)
-      const updatedHistory = [
-        {
-          timestamp: new Date(),
-          message: newMessage,
-          intent: intent,
-          response: response,
-        },
-        ...userData.conversationHistory.slice(0, 49), // Mantener solo los últimos 50
-      ];
-
-      await userDoc.update({
-        lastIntent: intent,
-        conversationHistory: updatedHistory,
-        lastInteraction: new Date(),
-      });
-
-      this.logger.debug(`Updated user context for ${userId} with intent: ${intent}`);
+      await this.firestoreService.saveMessageResult(result);
+      await this.firestoreService.updateUserContext(
+        result.userId,
+        result.originalMessage,
+        result.intent,
+        result.response
+      );
+      this.logger.log(`Saved processing result for message ${result.messageId}`);
     } catch (error) {
-      this.logger.error(`Error updating user context for ${userId}:`, error);
-      throw error;
+      this.logger.error(`Error saving message result: ${error.message}`);
     }
   }
 
-  async saveMessageResult(data: ProcessedMessage): Promise<void> {
-    try {
-      const collection = this.db.collection('processed_messages');
-      await collection.add({
-        ...data,
-        timestamp: new Date(),
-      });
-      this.logger.debug(`Saved processed message: ${data.messageId}`);
-    } catch (error) {
-      this.logger.error('Error saving message result:', error);
-      throw error;
-    }
+  generateQuickResponse(intent: string, entities: Record<string, any>): string {
+    const responses = {
+      tracking: `Te ayudo con el seguimiento de tu pedido...`,
+      consult_order: `Voy a consultar el estado de tu pedido...`,
+      complaint: `Lamento escuchar eso. Te ayudo con tu reclamo...`,
+      sales: `Te proporciono información sobre nuestros planes...`,
+      support: `Te ayudo con el soporte técnico...`,
+      info_general: `Te ayudo con tu consulta...`,
+    };
+
+    return responses[intent] || responses.info_general;
   }
 
-  async getMessageHistory(userId: string, limit: number = 10): Promise<ProcessedMessage[]> {
-    try {
-      const collection = this.db.collection('processed_messages');
-      const snapshot = await collection
-        .where('userId', '==', userId)
-        .orderBy('timestamp', 'desc')
-        .limit(limit)
-        .get();
-
-      return snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data(),
-      } as ProcessedMessage));
-    } catch (error) {
-      this.logger.error(`Error getting message history for ${userId}:`, error);
-      return [];
-    }
-  }
-
-  // Métodos para análisis y métricas
-  async getIntentStats(timeRange: 'day' | 'week' | 'month' = 'day'): Promise<any> {
-    try {
-      const collection = this.db.collection('ai_results');
-      const startDate = this.getStartDate(timeRange);
-      
-      const snapshot = await collection
-        .where('timestamp', '>=', startDate)
-        .get();
-
-      const stats = {
-        total: snapshot.size,
-        successful: 0,
-        failed: 0,
-        byIntent: {} as Record<string, number>,
-        avgAttempts: 0,
-        totalTokens: 0,
-      };
-
-      let totalAttempts = 0;
-
-      snapshot.forEach(doc => {
-        const data = doc.data();
-        if (data.success) {
-          stats.successful++;
-          stats.byIntent[data.finalIntent] = (stats.byIntent[data.finalIntent] || 0) + 1;
-        } else {
-          stats.failed++;
-        }
-        
-        totalAttempts += data.totalAttempts || 0;
-        stats.totalTokens += data.totalTokens || 0;
-      });
-
-      stats.avgAttempts = stats.total > 0 ? totalAttempts / stats.total : 0;
-
-      return stats;
-    } catch (error) {
-      this.logger.error('Error getting intent stats:', error);
-      return {};
-    }
-  }
-
-  async saveCostAnalysis(data: {
-    date: Date;
-    totalTokens: number;
-    totalCost: number;
-    requests: number;
-    avgTokensPerRequest: number;
-  }): Promise<void> {
-    try {
-      const collection = this.db.collection('cost_analysis');
-      await collection.add({
-        ...data,
-        timestamp: new Date(),
-      });
-    } catch (error) {
-      this.logger.error('Error saving cost analysis:', error);
-      throw error;
-    }
-  }
-
-  // Métodos auxiliares privados
-  private calculateProcessingTime(attempts: AttemptLog[]): number {
-    if (attempts.length < 2) return 0;
+  async verifyWebhook(mode: string, token: string, challenge: string): Promise<string | null> {
+    const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
     
-    const firstAttempt = attempts[0].timestamp;
-    const lastAttempt = attempts[attempts.length - 1].timestamp;
+    if (mode === 'subscribe' && token === verifyToken) {
+      this.logger.log('Webhook verified successfully');
+      return challenge;
+    }
     
-    return lastAttempt.getTime() - firstAttempt.getTime();
-  }
-
-  private getStartDate(timeRange: 'day' | 'week' | 'month'): Date {
-    const now = new Date();
-    switch (timeRange) {
-      case 'day':
-        return new Date(now.setDate(now.getDate() - 1));
-      case 'week':
-        return new Date(now.setDate(now.getDate() - 7));
-      case 'month':
-        return new Date(now.setMonth(now.getMonth() - 1));
-      default:
-        return new Date(now.setDate(now.getDate() - 1));
-    }
-  }
-
-  // Método para limpieza de datos antiguos (opcional)
-  async cleanupOldData(daysOld: number = 30): Promise<void> {
-    try {
-      const cutoffDate = new Date();
-      cutoffDate.setDate(cutoffDate.getDate() - daysOld);
-
-      const collections = ['ai_attempts', 'processed_messages', 'cost_analysis'];
-      
-      for (const collectionName of collections) {
-        const collection = this.db.collection(collectionName);
-        const snapshot = await collection
-          .where('timestamp', '<', cutoffDate)
-          .get();
-
-        const batch = this.db.batch();
-        snapshot.docs.forEach(doc => {
-          batch.delete(doc.ref);
-        });
-
-        await batch.commit();
-        this.logger.log(`Cleaned up ${snapshot.size} old documents from ${collectionName}`);
-      }
-    } catch (error) {
-      this.logger.error('Error cleaning up old data:', error);
-    }
+    this.logger.warn('Webhook verification failed');
+    return null;
   }
 }

@@ -1,188 +1,235 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { OpenAI } from 'openai';
-import { 
-  AIEvaluateRequest, 
-  AIEvaluateResponse, 
-  AIIntentResponse,
-  AttemptLog,
-  VALID_INTENTS 
-} from '../shared/interfaces/ai.interface';
-import { CostCalculator } from '../shared/utils/cost-calculator.util';
+import { Injectable, Logger }  from '@nestjs/common';
+import { ConfigService }       from '@nestjs/config';
+import { OpenAI }              from 'openai';
+import { EvaluateRequestDto, EvaluateResponseDto}      from 'src/ai/dto';
+import { CostCalculator, PromptBuilder }               from 'src/shared/utils';
+import { AIIntentResponse, AttemptLog, VALID_INTENTS } from 'src/shared/interfaces/ai.interface';
+import { IAIService }          from 'src/ai/interface/ai-service.interface';
 
 @Injectable()
-export class AIService {
+export class AIService implements IAIService {
   private readonly logger = new Logger(AIService.name);
   private openai: OpenAI;
   private readonly MAX_ATTEMPTS = 3;
 
-  constructor(private configService: ConfigService) {
+  constructor(
+    private configService: ConfigService,
+    private readonly promptBuilder: PromptBuilder,
+  ) {
+    // Inicializa el cliente de OpenAI con la API key desde variables de entorno
     this.openai = new OpenAI({
       apiKey: this.configService.get('OPENAI_API_KEY'),
     });
   }
 
-  async classifyIntentWithRetry(
-    message: string, 
-    expectedIntent: string
-  ): Promise<AIEvaluateResponse> {
-    const attempts: AttemptLog[] = [];
-    let attempt = 1;
+  /**
+   * Método principal que orquesta la evaluación de intenciones con reintentos
+   * Este es el punto de entrada desde el controlador
+   */
+  async evaluateIntent(request: EvaluateRequestDto): Promise<EvaluateResponseDto> {
+    const { message, expectedIntent } = request;
+    const attempts: AttemptLog[] = []; // Array para trackear todos los intentos
+    let attempt = 1; // Contador de intentos actual
 
+    // Bucle principal de reintentos - hasta 3 intentos máximo
     while (attempt <= this.MAX_ATTEMPTS) {
       try {
-        const prompt = this.createPrompt(message, attempts, expectedIntent);
-        const response = await this.callAI(prompt);
+        // Procesa un intento de clasificación
+        const result = await this.processAttempt(message, expectedIntent, attempts, attempt);
         
-        const attemptLog: AttemptLog = {
-          attempt,
-          prompt: prompt.substring(0, 100) + '...', // Log parcial por seguridad
-          response,
-          timestamp: new Date(),
-          tokensUsed: response.estimatedTokens || 0,
-        };
+        // Si el intento fue exitoso (la IA devolvió la intención esperada)
+        if (result.success) {
 
-        attempts.push(attemptLog);
-
-        // Verificar si coincide
-        if (response.intent === expectedIntent) {
-          const totalCost = CostCalculator.calculateCost(
-            attempts.reduce((sum, a) => sum + (a.tokensUsed || 0), 0)
-          );
-
-          return {
-            ok: true,
-            intent: response.intent,
-            attemptsUsed: attempt,
-            entities: response.entities,
-            cost: totalCost,
-          };
+          // Calcula el total de tokens usados en todos los intentos
+          const totalTokens = this.calculateTotalTokens(attempts);
+          
+          return this.buildSuccessResponse(result.response, attempt, totalTokens);
         }
 
-        this.logger.warn(`Attempt ${attempt} failed. Expected: ${expectedIntent}, Got: ${response.intent}`);
-        
+        // Si falló, loggea el warning y prepara siguiente intento
+        this.logger.warn(`Attempt ${attempt} failed. Got: ${result.response.intent}, Expected: ${expectedIntent}`);
         attempt++;
         
-        if (attempt > this.MAX_ATTEMPTS) {
-          break;
-        }
-
-        // Pausa exponencial entre reintentos
-        await this.delay(Math.pow(2, attempt) * 100);
+        // Si ya se alcanzó el máximo de intentos, sale del bucle
+        if (attempt > this.MAX_ATTEMPTS) break;
+        
+        // Pequeña pausa exponencial antes del siguiente intento
+        await this.delay(this.calculateDelay(attempt));
 
       } catch (error) {
+        // Manejo de errores durante el procesamiento del intento
         this.logger.error(`Attempt ${attempt} error: ${error.message}`);
+        await this.handleAttemptError(attempts, attempt, error);
         attempt++;
         
-        if (attempt > this.MAX_ATTEMPTS) {
-          break;
-        }
-        
-        await this.delay(1000);
+        if (attempt > this.MAX_ATTEMPTS) break;
       }
     }
 
+    // Si llegamos aquí, todos los intentos fallaron
+    return await this.handleFinalFailure(message, expectedIntent, attempts);
+  }
+
+  /**
+   * Clasifica la intención de un mensaje usando IA con capacidad de reintentos
+   * Este método es usado internamente por processAttempt
+   */
+  async classifyIntentWithRetry(
+    message: string, 
+    expectedIntent: string,
+    previousAttempts: AttemptLog[] = []
+  ): Promise<AIIntentResponse> {
+    // Construye el prompt dinámicamente basado en intentos anteriores
+    const prompt = this.promptBuilder.buildPrompt(message, previousAttempts, expectedIntent);
+    // Llama a la API de OpenAI/Gemini
+    return await this.callAI(prompt);
+  }
+
+  /**
+   * Procesa un intento individual de clasificación
+   * Retorna si fue exitoso y la respuesta de la IA
+   */
+  private async processAttempt(
+    message: string,
+    expectedIntent: string,
+    attempts: AttemptLog[], // Array mutable que se va llenando con cada intento
+    attempt: number // Número del intento actual (1, 2, o 3)
+  ): Promise<{ success: boolean; response: AIIntentResponse }> {
+ 
+    // Llama a la IA para clasificar el mensaje
+    const response = await this.classifyIntentWithRetry(message, expectedIntent, attempts);
+    
+    // Crea el log de este intento para tracking
+    const attemptLog: AttemptLog = {
+      attempt,
+      prompt: `Enhanced prompt attempt ${attempt}`,
+      response,
+      timestamp: new Date(),
+      tokensUsed: response.estimatedTokens || 0, // Tokens consumidos en este intento
+    };
+
+    // Agrega el intento al historial
+    attempts.push(attemptLog);
+
+    // Retorna si fue exitoso y la respuesta completa
     return {
-      ok: false,
-      error: 'IA did not match expected intent after 3 attempts',
-      attemptsUsed: this.MAX_ATTEMPTS,
+      success: response.intent === expectedIntent, // Compara lo que devolvió la IA vs lo esperado
+      response
     };
   }
 
-  private createPrompt(
-    message: string, 
-    previousAttempts: AttemptLog[], 
-    expectedIntent: string
-  ): string {
-    const trainingExamples = [
-      { message: "Quiero saber el estado de mi pedido 91283", intent: "consult_order" },
-      { message: "Necesito hacer un reclamo por un producto que llegó roto", intent: "complaint" },
-      { message: "Mi pedido no ha llegado todavía", intent: "tracking" },
-      { message: "¿Qué planes de suscripción tienen?", intent: "sales" },
-      { message: "No puedo acceder a mi cuenta", intent: "support" },
-      { message: "Horarios de atención", intent: "info_general" }
-    ];
+  /**
+   * Construye la respuesta de éxito cuando la IA coincide con la intención esperada
+   */
+  private buildSuccessResponse(
+    response: AIIntentResponse, // Respuesta exitosa de la IA
+    attemptsUsed: number, // Cuántos intentos se necesitaron (1, 2, o 3)
+    totalTokens: number // Total de tokens usados en todos los intentos
+  ): EvaluateResponseDto {
+    // Calcula el costo basado en el total de tokens
+    const totalCost = CostCalculator.calculateCost(totalTokens);
 
-    const forbiddenIntents = previousAttempts
-      .map(attempt => attempt.response.intent)
-      .filter(intent => intent !== expectedIntent);
-
-    const analysisContext = previousAttempts.length > 0 
-      ? `ANÁLISIS PREVIO: En intentos anteriores se clasificó como: ${previousAttempts.map(a => 
-          `${a.response.intent} (confianza: ${a.response.confidence})`
-        ).join(', ')}. EVITA estas clasificaciones.`
-      : '';
-
-    const forbiddenContext = forbiddenIntents.length > 0
-      ? `CLASIFICACIONES PROHIBIDAS: No uses ${forbiddenIntents.join(', ')} bajo ninguna circunstancia.`
-      : '';
-
-    return `
-ROLE: Eres un clasificador de intenciones para servicio al cliente.
-TAREA: Analizar el mensaje del usuario y clasificar en UNA de estas intenciones:
-
-INTENCIONES VÁLIDAS (exclusivamente estas):
-- consult_order: Consultas sobre estado de pedidos existentes
-- complaint: Reclamos, quejas, productos defectuosos
-- sales: Consultas comerciales, precios, productos nuevos
-- support: Soporte técnico, problemas de acceso, ayuda
-- tracking: Seguimiento de envíos, ubicación de pedidos
-- info_general: Información general que no encaja en otras categorías
-
-EJEMPLOS DE ENTRENAMIENTO:
-${trainingExamples.map(ex => `- "${ex.message}" → ${ex.intent}`).join('\n')}
-
-${analysisContext}
-${forbiddenContext}
-
-CONTEXTO ACTUAL:
-- INTENCIÓN ESPERADA: ${expectedIntent}
-- MENSAJE A ANALIZAR: "${message}"
-
-INSTRUCCIONES CRÍTICAS:
-1. DEBES responder EXCLUSIVAMENTE con la intención: ${expectedIntent}
-2. Si el mensaje puede interpretarse razonablemente como ${expectedIntent}, ÚSALO
-3. ${forbiddenContext ? 'BAJO NINGUNA CIRCUNSTANCIA uses las clasificaciones prohibidas' : ''}
-4. Extrae entidades relevantes (números de pedido, productos, etc.)
-5. Proporciona confianza basada en el análisis semántico
-
-RESPUESTA EN FORMATO JSON (estricto):
-{
-  "intent": "${expectedIntent}",
-  "entities": { "key": "value" },
-  "confidence": 0.95,
-  "reasoning": "breve explicación de por qué coincide con ${expectedIntent}"
-}
-
-IMPORTANTE: El campo "intent" DEBE ser exactamente "${expectedIntent}"
-    `.trim();
+    // Retorna la respuesta estructurada para el cliente
+    return {
+      ok: true,
+      intent: response.intent, // Intención clasificada (debería ser igual a expectedIntent)
+      attemptsUsed, // Número de intentos utilizados
+      entities: response.entities, // Entidades extraídas (números de pedido, etc.)
+      cost: totalCost, // Costo total en dólares
+      totalTokens, // Opcional: útil para debugging y análisis
+    };
   }
 
+  /**
+   * Maneja el caso cuando todos los intentos fallan
+   */
+  private async handleFinalFailure(
+    message: string,
+    expectedIntent: string,
+    attempts: AttemptLog[] // Historial completo de todos los intentos fallidos
+  ): Promise<EvaluateResponseDto> {
+    const finalError = 'IA did not match expected intent after 3 attempts';
+    
+    // TODO: Aquí iría la llamada a FirestoreService para guardar el resultado final
+    // await this.firestoreService.logFinalResult({
+    //   message,
+    //   expectedIntent,
+    //   attempts,
+    //   success: false,
+    //   error: finalError,
+    // });
+
+    // Retorna respuesta de error al cliente
+    return {
+      ok: false,
+      error: finalError,
+      attemptsUsed: this.MAX_ATTEMPTS, // Siempre 3 cuando falla
+    };
+  }
+
+  /**
+   * Maneja errores durante un intento individual (falla de API, timeout, etc.)
+   */
+  private async handleAttemptError(
+    attempts: AttemptLog[], // Array mutable de intentos
+    attempt: number, // Número del intento que falló
+    error: Error // Error que ocurrió
+  ): Promise<void> {
+    // Crea un log de error para tracking
+    const errorAttempt: AttemptLog = {
+      attempt,
+      prompt: `Error in attempt ${attempt}`,
+      response: { 
+        intent: 'error', // Intención especial para indicar error
+        entities: {}, // Sin entidades
+        confidence: 0, // Confianza cero
+        estimatedTokens: 0 // Sin tokens consumidos
+      },
+      timestamp: new Date(),
+      tokensUsed: 0,
+      error: error.message, // Mensaje del error
+    };
+
+    // Agrega el intento fallido al historial
+    attempts.push(errorAttempt);
+    
+    // TODO: Aquí iría la llamada a FirestoreService para guardar el intento fallido
+    // await this.firestoreService.logAttempt({
+    //   message: 'N/A', 
+    //   expectedIntent: 'N/A',
+    //   ...errorAttempt
+    // });
+  }
+
+  /**
+   * Llama a la API de OpenAI/Gemini para clasificar la intención
+   * Este es el método que realmente interactúa con el modelo de IA
+   */
   private async callAI(prompt: string): Promise<AIIntentResponse> {
     try {
+      // Realiza la llamada a la API de OpenAI
       const completion = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.1, // Baja temperatura para consistencia
-        max_tokens: 200,
+        model: 'gpt-3.5-turbo', // Modelo a utilizar
+        messages: [{ role: 'user', content: prompt }], // Prompt construido
+        temperature: 0.1, // Baja temperatura para respuestas consistentes
+        max_tokens: 200, // Límite de tokens en la respuesta
       });
 
+      // Extrae el contenido de la respuesta
       const content = completion.choices[0]?.message?.content;
       if (!content) {
         throw new Error('Empty response from AI');
       }
 
+      // Parsea la respuesta JSON de la IA
       const response = JSON.parse(content) as AIIntentResponse;
       
-      // Validación robusta de la respuesta
-      if (!VALID_INTENTS.includes(response.intent as any)) {
-        this.logger.warn(`Invalid intent received: ${response.intent}`);
-        throw new Error(`AI returned invalid intent: ${response.intent}`);
-      }
+      // Valida que la respuesta tenga el formato correcto
+      this.validateAIResponse(response);
 
-      // Calcular tokens estimados
+      // Calcula tokens usados (si la API no lo proporciona, hace estimación)
       response.estimatedTokens = completion.usage?.total_tokens || 
-        Math.ceil(content.length / 4);
+        Math.ceil(content.length / 4); // Estimación aproximada: 1 token ≈ 4 caracteres
 
       return response;
 
@@ -192,9 +239,42 @@ IMPORTANTE: El campo "intent" DEBE ser exactamente "${expectedIntent}"
     }
   }
 
+  /**
+   * Valida que la respuesta de la IA tenga el formato y datos correctos
+   * Esto SÍ es necesario porque valida la respuesta de la API externa, no el request del usuario
+   */
+  private validateAIResponse(response: AIIntentResponse): void {
+    // Verifica que la intención devuelta sea una de las válidas
+    if (!VALID_INTENTS.includes(response.intent as any)) {
+      this.logger.warn(`Invalid intent received: ${response.intent}`);
+      throw new Error(`AI returned invalid intent: ${response.intent}`);
+    }
+
+    // Asegura que la confianza esté en un rango válido (0-1)
+    if (!response.confidence || response.confidence < 0 || response.confidence > 1) {
+      response.confidence = 0.5; // Valor por defecto si no es válido
+    }
+  }
+
+  /**
+   * Calcula el total de tokens usados en todos los intentos
+   */
+  private calculateTotalTokens(attempts: AttemptLog[]): number {
+    return attempts.reduce((sum, attempt) => sum + (attempt.tokensUsed || 0), 0);
+  }
+
+  /**
+   * Calcula el delay exponencial entre reintentos
+   * Attempt 1: 200ms, Attempt 2: 400ms, Attempt 3: 800ms
+   */
+  private calculateDelay(attempt: number): number {
+    return Math.pow(2, attempt) * 100;
+  }
+
+  /**
+   * Utilidad para hacer pausas asíncronas
+   */
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
-
-  
 }

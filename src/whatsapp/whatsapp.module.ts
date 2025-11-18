@@ -1,9 +1,8 @@
-import { Module } from '@nestjs/common';
-import { WhatsAppController } from './whatsapp.controller';
-import { WhatsAppService } from './whatsapp.service';
-import { QueueModule } from '../queue/queue.module';
-import { FirestoreModule } from '../firestore/firestore.module';
-import { AIService } from '../ai/ai.service';
+import { Module }             from '@nestjs/common';
+import { WhatsAppController } from 'src/whatsapp/whatsapp.controller';
+import { WhatsAppService }    from 'src/whatsapp/whatsapp.service';
+import { QueueModule }        from 'src/queue/queue.module';
+import { FirestoreModule }    from 'src/firestore/firestore.module';
 
 @Module({
   imports: [
@@ -11,7 +10,7 @@ import { AIService } from '../ai/ai.service';
     FirestoreModule,
   ],
   controllers: [WhatsAppController],
-  providers: [WhatsAppService, AIService],
+  providers: [WhatsAppService],
   exports: [WhatsAppService],
 })
 export class WhatsAppModule {}

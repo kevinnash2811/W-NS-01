@@ -15,6 +15,8 @@ export interface AIIntentResponse {
   intent: string;
   entities: Record<string, any>;
   confidence: number;
+  reasoning?: string;
+  estimatedTokens?: number;
 }
 
 export interface AttemptLog {
@@ -22,7 +24,8 @@ export interface AttemptLog {
   prompt: string;
   response: AIIntentResponse;
   timestamp: Date;
-  tokensUsed?: number;
+  tokensUsed: number;
+  error?: string;
 }
 
 export const VALID_INTENTS = [

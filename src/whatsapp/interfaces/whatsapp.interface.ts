@@ -15,18 +15,22 @@ export interface WhatsAppContact {
 }
 
 export interface ProcessedMessage {
-  messageId: string;
-  originalMessage: string;
-  processedMessage: string;
-  intent: string;
-  entities: Record<string, any>;
-  confidence: number;
-  response: string;
-  timestamp: Date;
+  id: string; // ID del documento en Firestore
+  messageId: string; // ID del mensaje de WhatsApp
+  userId: string; // ID del usuario
+  originalMessage: string; // Mensaje original
+  processedMessage: string; // Mensaje procesado
+  intent: string; // Intención detectada
+  entities: Record<string, any>; // Entidades extraídas
+  confidence: number; // Confianza de la clasificación
+  response: string; // Respuesta generada
+  timestamp: Date; // Fecha de procesamiento
+  processingTime?: number; // Tiempo de procesamiento en ms
+  attempts?: number; // Número de intentos
 }
 
 export interface UserContext {
-  userId: string;
+  userId?: string;
   lastIntent: string;
   conversationHistory: Array<{
     timestamp: Date;
