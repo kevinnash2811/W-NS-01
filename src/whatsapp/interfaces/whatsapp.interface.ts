@@ -40,4 +40,5 @@ export interface UserContext {
   }>;
   preferredLanguage: string;
   lastInteraction: Date;
+  createdAt?: Date;
 }
