@@ -3,8 +3,9 @@ import { ConfigService }       from '@nestjs/config';
 import { OpenAI }              from 'openai';
 import { EvaluateRequestDto, EvaluateResponseDto}      from 'src/ai/dto';
 import { CostCalculator, PromptBuilder }               from 'src/shared/utils';
-import { AIIntentResponse, AttemptLog, VALID_INTENTS } from 'src/shared/interfaces/ai.interface';
+import { AIIntentResponse, AttemptLog, VALID_INTENTS, InteractionRecord } from 'src/shared/interfaces/ai.interface';
 import { IAIService }          from 'src/ai/interface/ai-service.interface';
+import { FirestoreService }    from 'src/firestore/firestore.service';
 
 @Injectable()
 export class AIService implements IAIService {
@@ -15,6 +16,7 @@ export class AIService implements IAIService {
   constructor(
     private configService: ConfigService,
     private readonly promptBuilder: PromptBuilder,
+    private readonly firestoreService: FirestoreService, //Inyectar FirestoreService
   ) {
     // Inicializa el cliente de OpenAI con la API key desde variables de entorno
     this.openai = new OpenAI({
@@ -26,23 +28,47 @@ export class AIService implements IAIService {
    * Método principal que orquesta la evaluación de intenciones con reintentos
    * Este es el punto de entrada desde el controlador
    */
-  async evaluateIntent(request: EvaluateRequestDto): Promise<EvaluateResponseDto> {
+  async evaluateIntent(request: EvaluateRequestDto, metadata?: any): Promise<EvaluateResponseDto> {
+    const startTime = Date.now(); //Medir tiempo total
     const { message, expectedIntent } = request;
     const attempts: AttemptLog[] = []; // Array para trackear todos los intentos
     let attempt = 1; // Contador de intentos actual
 
+    this.logger.log(`Starting intent evaluation for: "${message}"`);
+
     // Bucle principal de reintentos - hasta 3 intentos máximo
     while (attempt <= this.MAX_ATTEMPTS) {
+      const attemptStartTime = Date.now(); //Medir tiempo por intento
+      
       try {
         // Procesa un intento de clasificación
-        const result = await this.processAttempt(message, expectedIntent, attempts, attempt);
+        const result = await this.processAttempt(message, expectedIntent, attempts, attempt, attemptStartTime);
         
         // Si el intento fue exitoso (la IA devolvió la intención esperada)
         if (result.success) {
-
+          this.logger.log(`Intent matched on attempt ${attempt}`);
+          
           // Calcula el total de tokens usados en todos los intentos
           const totalTokens = this.calculateTotalTokens(attempts);
+          const processingTime = Date.now() - startTime; //Tiempo total
           
+          // Guardar registro completo de interacción
+          await this.saveInteractionRecord({
+            message,
+            expectedIntent,
+            attempts,
+            finalResult: {
+              ok: true,
+              intent: result.response.intent,
+              attemptsUsed: attempt,
+              entities: result.response.entities,
+              cost: CostCalculator.calculateCost(totalTokens),
+              totalTokens,
+            },
+            processingTime,
+            metadata
+          });
+
           return this.buildSuccessResponse(result.response, attempt, totalTokens);
         }
 
@@ -57,9 +83,10 @@ export class AIService implements IAIService {
         await this.delay(this.calculateDelay(attempt));
 
       } catch (error) {
+        const attemptDuration = Date.now() - attemptStartTime;
         // Manejo de errores durante el procesamiento del intento
         this.logger.error(`Attempt ${attempt} error: ${error.message}`);
-        await this.handleAttemptError(attempts, attempt, error);
+        await this.handleAttemptError(attempts, attempt, error, attemptDuration);
         attempt++;
         
         if (attempt > this.MAX_ATTEMPTS) break;
@@ -67,7 +94,8 @@ export class AIService implements IAIService {
     }
 
     // Si llegamos aquí, todos los intentos fallaron
-    return await this.handleFinalFailure(message, expectedIntent, attempts);
+    const processingTime = Date.now() - startTime;
+    return await this.handleFinalFailure(message, expectedIntent, attempts, processingTime, metadata);
   }
 
   /**
@@ -93,19 +121,27 @@ export class AIService implements IAIService {
     message: string,
     expectedIntent: string,
     attempts: AttemptLog[], // Array mutable que se va llenando con cada intento
-    attempt: number // Número del intento actual (1, 2, o 3)
+    attempt: number, // Número del intento actual (1, 2, o 3)
+    attemptStartTime: number // ← Agregar tiempo de inicio
   ): Promise<{ success: boolean; response: AIIntentResponse }> {
- 
+    this.logger.log(`Attempt ${attempt} for expected intent: ${expectedIntent}`);
+    
     // Llama a la IA para clasificar el mensaje
     const response = await this.classifyIntentWithRetry(message, expectedIntent, attempts);
     
+    const attemptDuration = Date.now() - attemptStartTime; // ← Calcular duración
+    
+    // Construir prompt completo para registro
+    const prompt = this.promptBuilder.buildPrompt(message, attempts, expectedIntent);
+
     // Crea el log de este intento para tracking
     const attemptLog: AttemptLog = {
       attempt,
-      prompt: `Enhanced prompt attempt ${attempt}`,
+      prompt: prompt, // ← Guardar prompt COMPLETO, no solo descripción
       response,
       timestamp: new Date(),
-      tokensUsed: response.estimatedTokens || 0, // Tokens consumidos en este intento
+      tokensUsed: response.estimatedTokens || 0,
+      duration: attemptDuration, // ← Agregar duración del intento
     };
 
     // Agrega el intento al historial
@@ -116,6 +152,46 @@ export class AIService implements IAIService {
       success: response.intent === expectedIntent, // Compara lo que devolvió la IA vs lo esperado
       response
     };
+  }
+
+  /**
+   * Guardar registro completo de interacción en Firestore
+   */
+  private async saveInteractionRecord(data: {
+    message: string;
+    expectedIntent: string;
+    attempts: AttemptLog[];
+    finalResult: {
+      ok: boolean;
+      intent?: string;
+      attemptsUsed?: number;
+      error?: string;
+      entities?: Record<string, any>;
+      cost?: number;
+      totalTokens?: number;
+    };
+    processingTime: number;
+    metadata?: any;
+  }): Promise<void> {
+    try {
+      const interaction: InteractionRecord = {
+        message: data.message,
+        expectedIntent: data.expectedIntent,
+        finalResult: data.finalResult,
+        attemptsHistory: data.attempts,
+        timestamp: new Date(),
+        processingTime: data.processingTime,
+        metadata: data.metadata || {},
+      };
+
+      // Guardar en Firestore usando el servicio
+      await this.firestoreService.saveInteraction(interaction);
+      
+      this.logger.log(`💾 Interaction recorded: ${data.finalResult.ok ? 'SUCCESS' : 'FAILED'} - ${data.attempts.length} attempts`);
+    } catch (error) {
+      this.logger.error('💥 Error saving interaction record:', error);
+      // No throw para no interrumpir el flujo principal
+    }
   }
 
   /**
@@ -146,18 +222,26 @@ export class AIService implements IAIService {
   private async handleFinalFailure(
     message: string,
     expectedIntent: string,
-    attempts: AttemptLog[] // Historial completo de todos los intentos fallidos
+    attempts: AttemptLog[], // Historial completo de todos los intentos fallidos
+    processingTime: number, // ← Agregar tiempo de procesamiento
+    metadata?: any // ← Agregar metadata
   ): Promise<EvaluateResponseDto> {
     const finalError = 'IA did not match expected intent after 3 attempts';
+    this.logger.error(finalError);
     
-    // TODO: Aquí iría la llamada a FirestoreService para guardar el resultado final
-    // await this.firestoreService.logFinalResult({
-    //   message,
-    //   expectedIntent,
-    //   attempts,
-    //   success: false,
-    //   error: finalError,
-    // });
+    // Guardar registro de interacción fallida
+    await this.saveInteractionRecord({
+      message,
+      expectedIntent,
+      attempts,
+      finalResult: {
+        ok: false,
+        error: finalError,
+        attemptsUsed: this.MAX_ATTEMPTS,
+      },
+      processingTime,
+      metadata
+    });
 
     // Retorna respuesta de error al cliente
     return {
@@ -173,32 +257,28 @@ export class AIService implements IAIService {
   private async handleAttemptError(
     attempts: AttemptLog[], // Array mutable de intentos
     attempt: number, // Número del intento que falló
-    error: Error // Error que ocurrió
+    error: Error, // Error que ocurrió
+    duration: number // ← Agregar duración del intento
   ): Promise<void> {
     // Crea un log de error para tracking
     const errorAttempt: AttemptLog = {
       attempt,
-      prompt: `Error in attempt ${attempt}`,
+      prompt: `Error in attempt ${attempt}: ${error.message}`, //Incluir error en prompt
       response: { 
         intent: 'error', // Intención especial para indicar error
         entities: {}, // Sin entidades
         confidence: 0, // Confianza cero
-        estimatedTokens: 0 // Sin tokens consumidos
+        estimatedTokens: 0, // Sin tokens consumidos
+        reasoning: `Error: ${error.message}` //Agregar reasoning del error
       },
       timestamp: new Date(),
       tokensUsed: 0,
+      duration, // ← Agregar duración
       error: error.message, // Mensaje del error
     };
 
     // Agrega el intento fallido al historial
     attempts.push(errorAttempt);
-    
-    // TODO: Aquí iría la llamada a FirestoreService para guardar el intento fallido
-    // await this.firestoreService.logAttempt({
-    //   message: 'N/A', 
-    //   expectedIntent: 'N/A',
-    //   ...errorAttempt
-    // });
   }
 
   /**
@@ -229,7 +309,7 @@ export class AIService implements IAIService {
 
       // Calcula tokens usados (si la API no lo proporciona, hace estimación)
       response.estimatedTokens = completion.usage?.total_tokens || 
-        Math.ceil(content.length / 4); // Estimación aproximada: 1 token ≈ 4 caracteres
+        Math.ceil(content.length / 4); // Estimación aproximada: 1 token = 4 caracteres
 
       return response;
 

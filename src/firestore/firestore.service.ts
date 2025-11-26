@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Firestore } from '@google-cloud/firestore';
-import { AttemptLog, AIIntentResponse } from 'src/shared/interfaces/ai.interface';
+import { AttemptLog, AIIntentResponse, InteractionRecord } from 'src/shared/interfaces/ai.interface';
 import { UserContext, ProcessedMessage } from 'src/whatsapp/interfaces/whatsapp.interface';
 
 @Injectable()
@@ -15,7 +15,8 @@ export class FirestoreService implements OnModuleInit {
     AI_RESULTS: 'ai_results',
     PROCESSED_MESSAGES: 'processed_messages',
     COST_ANALYSIS: 'cost_analysis',
-    CONNECTION_TEST: 'connection_test'
+    CONNECTION_TEST: 'connection_test',
+    INTERACTIONS: 'interactions'
   };
 
   constructor() {
@@ -382,6 +383,76 @@ export class FirestoreService implements OnModuleInit {
         return new Date(now.setMonth(now.getMonth() - 1));
       default:
         return new Date(now.setDate(now.getDate() - 1));
+    }
+  }
+
+  /**
+   * Guardar registro completo de interacción
+   */
+  async saveInteraction(interaction: InteractionRecord): Promise<void> {
+    try {
+      const collection = this.db.collection(this.COLLECTIONS.INTERACTIONS);
+      await collection.add({
+        ...interaction,
+        timestamp: new Date(),
+      });
+      this.logger.debug(`📊 Saved interaction record: ${interaction.message.substring(0, 50)}...`);
+    } catch (error) {
+      this.logger.error('💥 Error saving interaction:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Obtener historial de interacciones
+   */
+  async getInteractions(
+    filters?: {
+      userId?: string;
+      dateFrom?: Date;
+      dateTo?: Date;
+      intent?: string;
+    },
+    limit: number = 50
+  ): Promise<InteractionRecord[]> {
+    try {
+      let query: any = this.db.collection(this.COLLECTIONS.INTERACTIONS);
+
+      // Aplicar filtros
+      if (filters?.userId) {
+        query = query.where('metadata.userId', '==', filters.userId);
+      }
+      if (filters?.intent) {
+        query = query.where('finalResult.intent', '==', filters.intent);
+      }
+      if (filters?.dateFrom) {
+        query = query.where('timestamp', '>=', filters.dateFrom);
+      }
+      if (filters?.dateTo) {
+        query = query.where('timestamp', '<=', filters.dateTo);
+      }
+
+      // Ordenar y limitar
+      query = query.orderBy('timestamp', 'desc').limit(limit);
+
+      const snapshot = await query.get();
+
+      return snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          message: data.message,
+          expectedIntent: data.expectedIntent,
+          finalResult: data.finalResult,
+          attemptsHistory: data.attemptsHistory,
+          timestamp: data.timestamp?.toDate(),
+          processingTime: data.processingTime || 0,
+          metadata: data.metadata || {},
+        } as InteractionRecord;
+      });
+    } catch (error) {
+      this.logger.error('💥 Error getting interactions:', error);
+      return [];
     }
   }
 }
