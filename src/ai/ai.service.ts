@@ -122,14 +122,14 @@ export class AIService implements IAIService {
     expectedIntent: string,
     attempts: AttemptLog[], // Array mutable que se va llenando con cada intento
     attempt: number, // Número del intento actual (1, 2, o 3)
-    attemptStartTime: number // ← Agregar tiempo de inicio
+    attemptStartTime: number //Agregar tiempo de inicio
   ): Promise<{ success: boolean; response: AIIntentResponse }> {
     this.logger.log(`Attempt ${attempt} for expected intent: ${expectedIntent}`);
     
     // Llama a la IA para clasificar el mensaje
     const response = await this.classifyIntentWithRetry(message, expectedIntent, attempts);
     
-    const attemptDuration = Date.now() - attemptStartTime; // ← Calcular duración
+    const attemptDuration = Date.now() - attemptStartTime; //Calcular duración
     
     // Construir prompt completo para registro
     const prompt = this.promptBuilder.buildPrompt(message, attempts, expectedIntent);
@@ -137,11 +137,11 @@ export class AIService implements IAIService {
     // Crea el log de este intento para tracking
     const attemptLog: AttemptLog = {
       attempt,
-      prompt: prompt, // ← Guardar prompt COMPLETO, no solo descripción
+      prompt: prompt, //Guardar prompt COMPLETO, no solo descripción
       response,
       timestamp: new Date(),
       tokensUsed: response.estimatedTokens || 0,
-      duration: attemptDuration, // ← Agregar duración del intento
+      duration: attemptDuration, //Agregar duración del intento
     };
 
     // Agrega el intento al historial
@@ -223,8 +223,8 @@ export class AIService implements IAIService {
     message: string,
     expectedIntent: string,
     attempts: AttemptLog[], // Historial completo de todos los intentos fallidos
-    processingTime: number, // ← Agregar tiempo de procesamiento
-    metadata?: any // ← Agregar metadata
+    processingTime: number, // Agregar tiempo de procesamiento
+    metadata?: any // agregar metadata
   ): Promise<EvaluateResponseDto> {
     const finalError = 'IA did not match expected intent after 3 attempts';
     this.logger.error(finalError);
@@ -258,7 +258,7 @@ export class AIService implements IAIService {
     attempts: AttemptLog[], // Array mutable de intentos
     attempt: number, // Número del intento que falló
     error: Error, // Error que ocurrió
-    duration: number // ← Agregar duración del intento
+    duration: number //Agregar duración del intento
   ): Promise<void> {
     // Crea un log de error para tracking
     const errorAttempt: AttemptLog = {
@@ -273,7 +273,7 @@ export class AIService implements IAIService {
       },
       timestamp: new Date(),
       tokensUsed: 0,
-      duration, // ← Agregar duración
+      duration, //Agregar duración
       error: error.message, // Mensaje del error
     };
 

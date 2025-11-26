@@ -455,4 +455,55 @@ export class FirestoreService implements OnModuleInit {
       return [];
     }
   }
+
+  /**
+   * Obtener interacciones por número exacto de intentos usados
+   */
+  async getInteractionsByAttempts(attempts: number, limit: number = 50): Promise<InteractionRecord[]> {
+    try {
+      const collection = this.db.collection(this.COLLECTIONS.INTERACTIONS);
+      
+      const snapshot = await collection
+        .where('finalResult.attemptsUsed', '==', attempts)
+        .orderBy('timestamp', 'desc')
+        .limit(limit)
+        .get();
+
+      return snapshot.docs.map(doc => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          message: data.message,
+          expectedIntent: data.expectedIntent,
+          finalResult: data.finalResult,
+          attemptsHistory: data.attemptsHistory,
+          timestamp: data.timestamp?.toDate(),
+          processingTime: data.processingTime || 0,
+          metadata: data.metadata || {},
+        } as InteractionRecord;
+      });
+    } catch (error) {
+      this.logger.error(`💥 Error getting interactions by attempts (${attempts}):`, error);
+      
+      // Si falla el query compuesto, hacer filtrado manual
+      return this.getInteractionsByAttemptsManual(attempts, limit);
+    }
+  }
+
+  /**
+   * Método alternativo si falla el query de Firestore
+   */
+  private async getInteractionsByAttemptsManual(attempts: number, limit: number = 50): Promise<InteractionRecord[]> {
+    try {
+      const allInteractions = await this.getInteractions({}, 200); // Obtener más para filtrar
+      
+      return allInteractions
+        .filter(interaction => interaction.finalResult.attemptsUsed === attempts)
+        .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+        .slice(0, limit);
+    } catch (error) {
+      this.logger.error('💥 Error in manual attempts filter:', error);
+      return [];
+    }
+  }
 }
