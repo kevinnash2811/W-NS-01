@@ -1,6 +1,6 @@
 import { Module }          from '@nestjs/common';
 import { ConfigModule }    from '@nestjs/config';
-
+import { HealthController }    from 'src/app.controller';
 import { AIModule }        from 'src/ai/ai.module';
 import { QueueModule }     from 'src/queue/queue.module';
 import { FirestoreModule } from 'src/firestore/firestore.module';
@@ -17,5 +17,6 @@ import { WhatsAppModule }  from 'src/whatsapp/whatsapp.module';
     FirestoreModule,
     WhatsAppModule,
   ],
+  controllers: [HealthController],
 })
 export class AppModule {}
