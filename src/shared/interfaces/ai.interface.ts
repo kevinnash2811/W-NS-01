@@ -25,6 +25,7 @@ export interface AttemptLog {
   response: AIIntentResponse;
   timestamp: Date;
   tokensUsed: number;
+  duration?: number;
   error?: string;
 }
 
@@ -36,3 +37,26 @@ export const VALID_INTENTS = [
   'tracking',
   'info_general'
 ] as const;
+
+export interface InteractionRecord {
+  id?: string;
+  message: string;
+  expectedIntent: string;
+  finalResult: {
+    ok: boolean;
+    intent?: string;
+    attemptsUsed?: number;
+    error?: string;
+    entities?: Record<string, any>;
+    cost?: number;
+    totalTokens?: number;
+  };
+  attemptsHistory: AttemptLog[];
+  timestamp: Date;
+  processingTime: number;
+  metadata?: {
+    userId?: string;
+    source?: string;
+    userAgent?: string;
+  };
+}
