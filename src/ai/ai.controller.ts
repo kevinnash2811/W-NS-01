@@ -16,15 +16,9 @@ import {
   ApiResponse, 
   ApiTags 
 } from '@nestjs/swagger';
-import { AIService } from 'src/ai/ai.service';
-import { FirestoreService } from 'src/firestore/firestore.service';
-import { 
-  EvaluateRequestDto, 
-  EvaluateResponseDto, 
-  AttemptsResponseDto,
-  AttemptsParamsDto,
-  AttemptsQueryDto 
-} from 'src/ai/dto';
+import { AIService } from './ai.service';
+import { FirestoreService } from '../firestore/firestore.service';
+import { EvaluateRequestDto, EvaluateResponseDto, AttemptsResponseDto, AttemptsParamsDto, AttemptsQueryDto } from './dto';
 
 @Controller('ai')
 @UsePipes(new ValidationPipe({ 

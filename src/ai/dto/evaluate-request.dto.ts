@@ -1,6 +1,6 @@
 import { IsString, IsIn, IsNotEmpty, MinLength } from 'class-validator';
 import { ApiProperty }   from '@nestjs/swagger';
-import { VALID_INTENTS } from 'src/shared/interfaces/ai.interface';
+import { VALID_INTENTS } from '../../shared/interfaces/ai.interface';
 
 export class EvaluateRequestDto {
   @ApiProperty({
