@@ -3,81 +3,127 @@ import { AttemptLog } from 'src/shared/interfaces/ai.interface';
 
 @Injectable()
 export class PromptBuilder {
+  // Ejemplos genéricos permitidos (NO del dataset de evaluación)
   private readonly trainingExamples = [
-    { message: "Quiero saber el estado de mi pedido 91283", intent: "consult_order" },
-    { message: "Necesito hacer un reclamo por un producto que llegó roto", intent: "complaint" },
-    { message: "Mi pedido no ha llegado todavía", intent: "tracking" },
-    { message: "¿Qué planes de suscripción tienen?", intent: "sales" },
-    { message: "No puedo acceder a mi cuenta", intent: "support" },
-    { message: "Horarios de atención", intent: "info_general" }
+    { 
+      message: "¿Dónde está mi paquete?", 
+      intent: "tracking",
+      reasoning: "El usuario pregunta por la ubicación o estado de envío de un paquete"
+    },
+    { 
+      message: "El producto que recibí está dañado", 
+      intent: "complaint",
+      reasoning: "El usuario reporta un producto en mal estado o defectuoso"
+    },
+    { 
+      message: "Quiero información sobre sus servicios", 
+      intent: "sales",
+      reasoning: "El usuario solicita información comercial o de productos"
+    },
+    { 
+      message: "No puedo iniciar sesión en mi cuenta", 
+      intent: "support",
+      reasoning: "El usuario tiene problemas técnicos o de acceso"
+    },
+    { 
+      message: "Cuál es el número de mi pedido 12345?", 
+      intent: "consult_order",
+      reasoning: "El usuario consulta información específica de un pedido existente"
+    },
+    { 
+      message: "Horarios de atención al cliente", 
+      intent: "info_general",
+      reasoning: "El usuario solicita información general no específica"
+    }
   ];
 
   buildPrompt(
     message: string, 
-    previousAttempts: AttemptLog[], 
-    expectedIntent: string
+    previousAttempts: AttemptLog[] = []
   ): string {
-    const analysisContext = this.buildAnalysisContext(previousAttempts);
-    const forbiddenContext = this.buildForbiddenContext(previousAttempts, expectedIntent);
+    const contextFromPreviousAttempts = this.buildContextFromPreviousAttempts(previousAttempts);
 
     return `
-ROLE: Eres un clasificador de intenciones para servicio al cliente.
-TAREA: Analizar el mensaje del usuario y clasificar en UNA de estas intenciones:
+ROLE: Eres un clasificador especializado en intenciones de servicio al cliente.
 
-INTENCIONES VÁLIDAS (exclusivamente estas):
-- consult_order: Consultas sobre estado de pedidos existentes
-- complaint: Reclamos, quejas, productos defectuosos
-- sales: Consultas comerciales, precios, productos nuevos
-- support: Soporte técnico, problemas de acceso, ayuda
-- tracking: Seguimiento de envíos, ubicación de pedidos
-- info_general: Información general que no encaja en otras categorías
+INTENCIONES VÁLIDAS (debes usar EXCLUSIVAMENTE una de estas):
+- consult_order: Consultas sobre estado, detalles o información de pedidos existentes
+- complaint: Reclamos, quejas, productos defectuosos, mal servicio
+- sales: Consultas comerciales, precios, productos, promociones, cotizaciones
+- support: Problemas técnicos, acceso, configuración, uso de plataforma
+- tracking: Seguimiento de envíos, ubicación en tiempo real, tiempo de entrega
+- info_general: Información general, horarios, políticas, FAQs no específicas
 
-EJEMPLOS DE ENTRENAMIENTO:
-${this.trainingExamples.map(ex => `- "${ex.message}" → ${ex.intent}`).join('\n')}
+EJEMPLOS DE CLASIFICACIÓN (para entender el contexto):
+${this.trainingExamples.map(ex => 
+  `MENSAJE: "${ex.message}" → INTENCIÓN: ${ex.intent} (RAZÓN: ${ex.reasoning})`
+).join('\n')}
 
-${analysisContext}
-${forbiddenContext}
+${contextFromPreviousAttempts}
 
-CONTEXTO ACTUAL:
-- INTENCIÓN ESPERADA: ${expectedIntent}
-- MENSAJE A ANALIZAR: "${message}"
+INSTRUCCIONES PARA CLASIFICAR:
+1. Analiza SEMÁNTICAMENTE el mensaje del usuario
+2. Identifica la intención PRINCIPAL más adecuada
+3. Considera el contexto y patrones lingüísticos
+4. Si hay ambigüedad, elige la intención más probable
+5. Extrae entidades relevantes (números, referencias, productos)
 
-INSTRUCCIONES CRÍTICAS:
-1. DEBES responder EXCLUSIVAMENTE con la intención: ${expectedIntent}
-2. Si el mensaje puede interpretarse razonablemente como ${expectedIntent}, ÚSALO
-3. ${forbiddenContext ? 'BAJO NINGUNA CIRCUNSTANCIA uses las clasificaciones prohibidas' : ''}
-4. Extrae entidades relevantes (números de pedido, productos, etc.)
-5. Proporciona confianza basada en el análisis semántico
+MENSAJE A CLASIFICAR: "${message}"
 
-RESPUESTA EN FORMATO JSON (estricto):
+RESPONDER EXCLUSIVAMENTE EN FORMATO JSON:
 {
-  "intent": "${expectedIntent}",
-  "entities": { "key": "value" },
+  "intent": "una_de_las_intenciones_válidas",
+  "entities": { "clave": "valor" },
   "confidence": 0.95,
-  "reasoning": "breve explicación de por qué coincide con ${expectedIntent}"
+  "reasoning": "Explicación breve de por qué esta intención es la correcta"
 }
 
-IMPORTANTE: El campo "intent" DEBE ser exactamente "${expectedIntent}"
+IMPORTANTE:
+- "intent" DEBE ser una de las 6 intenciones válidas listadas arriba
+- "confidence" debe reflejar tu certeza (0.0 a 1.0)
+- "entities" debe contener datos extraídos como números de pedido, productos, etc.
+- Sé objetivo en tu clasificación, no asumas contexto no presente en el mensaje
     `.trim();
   }
 
-  private buildAnalysisContext(previousAttempts: AttemptLog[]): string {
+  private buildContextFromPreviousAttempts(previousAttempts: AttemptLog[]): string {
     if (previousAttempts.length === 0) return '';
 
-    const previousClassifications = previousAttempts.map(attempt => 
-      `${attempt.response.intent} (confianza: ${attempt.response.confidence})`
-    ).join(', ');
-
-    return `ANÁLISIS PREVIO: En intentos anteriores se clasificó como: ${previousClassifications}. EVITA estas clasificaciones.`;
+    const lastAttempt = previousAttempts[previousAttempts.length - 1];
+    
+    return `CONTEXTO DE REINTENTO: 
+En la clasificación anterior, el mensaje fue interpretado como "${lastAttempt.response.intent}" 
+pero necesitamos reevaluar con más precisión. Analiza cuidadosamente la intención real.`;
   }
 
-  private buildForbiddenContext(previousAttempts: AttemptLog[], expectedIntent: string): string {
-    const forbiddenIntents = previousAttempts
+  // Nuevo método para prompts de reintento específico
+  buildRetryPrompt(
+    message: string,
+    previousAttempts: AttemptLog[],
+    expectedIntent: string
+  ): string {
+    const previousIntents = previousAttempts
       .map(attempt => attempt.response.intent)
-      .filter(intent => intent !== expectedIntent);
+      .join(', ');
 
-    if (forbiddenIntents.length === 0) return '';
+    return `
+REANÁLISIS REQUERIDO - CLASIFICACIÓN PRECISA
 
-    return `CLASIFICACIONES PROHIBIDAS: No uses ${forbiddenIntents.join(', ')} bajo ninguna circunstancia.`;
+MENSAJE ORIGINAL: "${message}"
+CLASIFICACIONES ANTERIORES: ${previousIntents}
+INTENCIÓN ESPERADA PARA VALIDACIÓN: ${expectedIntent}
+
+INSTRUCCIONES ESPECÍFICAS:
+1. Reanaliza el mensaje original objetivamente
+2. Considera por qué clasificaciones anteriores pudieron ser incorrectas
+3. Identifica la intención MÁS ADECUADA basada solo en el contenido del mensaje
+4. NO te dejes influenciar por la "intención esperada" - esta es solo para validación posterior
+5. Si el mensaje claramente corresponde a "${expectedIntent}", clasifícalo así
+6. Si corresponde a otra intención, sé honesto en tu clasificación
+
+Tu rol es clasificar con precisión, no adivinar lo que queremos escuchar.
+
+RESPONDER EN FORMATO JSON (mismo formato que antes):
+    `.trim();
   }
 }
