@@ -1,6 +1,6 @@
 
-import {EvaluateRequestDto, EvaluateResponseDto} from 'src/ai/dto'
-import { AttemptLog }                            from 'src/shared/interfaces/ai.interface';
+import { EvaluateRequestDto, EvaluateResponseDto } from '../dto';
+import { AttemptLog } from '../../shared/interfaces/ai.interface';
 
 export interface IAIService {
   evaluateIntent(request: EvaluateRequestDto): Promise<EvaluateResponseDto>;

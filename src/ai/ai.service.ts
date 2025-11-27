@@ -2,10 +2,11 @@ import { Injectable, Logger }  from '@nestjs/common';
 import { ConfigService }       from '@nestjs/config';
 import { OpenAI }              from 'openai';
 import { EvaluateRequestDto, EvaluateResponseDto}      from 'src/ai/dto';
-import { CostCalculator, PromptBuilder }               from 'src/shared/utils';
-import { AIIntentResponse, AttemptLog, VALID_INTENTS, InteractionRecord } from 'src/shared/interfaces/ai.interface';
-import { IAIService }          from 'src/ai/interface/ai-service.interface';
-import { FirestoreService }    from 'src/firestore/firestore.service';
+import { CostCalculator } from '../shared/utils/cost-calculator.util';
+import { PromptBuilder } from '../shared/utils/prompt-builder.util';
+import { AIIntentResponse, AttemptLog, VALID_INTENTS, InteractionRecord } from '../shared/interfaces/ai.interface';
+import { IAIService } from './interface/ai-service.interface';
+import { FirestoreService } from '../firestore/firestore.service';
 
 @Injectable()
 export class AIService implements IAIService {
@@ -108,7 +109,7 @@ export class AIService implements IAIService {
     previousAttempts: AttemptLog[] = []
   ): Promise<AIIntentResponse> {
     // Construye el prompt dinámicamente basado en intentos anteriores
-    const prompt = this.promptBuilder.buildPrompt(message, previousAttempts, expectedIntent);
+    const prompt = this.promptBuilder.buildPrompt(message, previousAttempts);
     // Llama a la API de OpenAI/Gemini
     return await this.callAI(prompt);
   }
@@ -120,36 +121,43 @@ export class AIService implements IAIService {
   private async processAttempt(
     message: string,
     expectedIntent: string,
-    attempts: AttemptLog[], // Array mutable que se va llenando con cada intento
-    attempt: number, // Número del intento actual (1, 2, o 3)
-    attemptStartTime: number //Agregar tiempo de inicio
+    attempts: AttemptLog[],
+    attempt: number,
+    attemptStartTime: number
   ): Promise<{ success: boolean; response: AIIntentResponse }> {
-    this.logger.log(`Attempt ${attempt} for expected intent: ${expectedIntent}`);
+    this.logger.log(`Attempt ${attempt} for message: ${message}`);
+    
+    // Construir prompt diferente según el intento
+    let prompt: string;
+    if (attempt === 1) {
+      // Primer intento: clasificación libre
+      prompt = this.promptBuilder.buildPrompt(message, attempts);
+    } else {
+      // Reintentos: prompt específico para reevaluación
+      prompt = this.promptBuilder.buildRetryPrompt(message, attempts, expectedIntent);
+    }
     
     // Llama a la IA para clasificar el mensaje
-    const response = await this.classifyIntentWithRetry(message, expectedIntent, attempts);
+    const response = await this.callAI(prompt);
     
-    const attemptDuration = Date.now() - attemptStartTime; //Calcular duración
-    
-    // Construir prompt completo para registro
-    const prompt = this.promptBuilder.buildPrompt(message, attempts, expectedIntent);
+    const attemptDuration = Date.now() - attemptStartTime;
 
     // Crea el log de este intento para tracking
     const attemptLog: AttemptLog = {
       attempt,
-      prompt: prompt, //Guardar prompt COMPLETO, no solo descripción
+      prompt: prompt,
       response,
       timestamp: new Date(),
       tokensUsed: response.estimatedTokens || 0,
-      duration: attemptDuration, //Agregar duración del intento
+      duration: attemptDuration,
     };
 
     // Agrega el intento al historial
     attempts.push(attemptLog);
 
-    // Retorna si fue exitoso y la respuesta completa
+    // VALIDACIÓN: Compara lo que devolvió la IA vs lo esperado
     return {
-      success: response.intent === expectedIntent, // Compara lo que devolvió la IA vs lo esperado
+      success: response.intent === expectedIntent, // ← Aquí se hace la validación real
       response
     };
   }
